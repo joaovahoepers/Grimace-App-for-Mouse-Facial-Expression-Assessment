@@ -1,0 +1,234 @@
+import customtkinter as ctk
+from PIL import Image, ImageTk
+import os
+import pandas as pd
+import subprocess
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment
+from openpyxl import load_workbook
+import re
+import random
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+FONT_TITLE = ("Helvetica", 14, "bold")
+FONT_LABEL = ("Helvetica", 12)
+BUTTON_WIDTH = 32
+BUTTON_HEIGHT = 28
+PADDING_VERT = 10
+PADDING_HORZ = 12
+
+ACTION_UNITS = ["ear position", "orbital tightening", "cheek bulge", "nose bulge"]
+
+SCORE_COLORS = ["#4CAF50", "#FFC107", "#F44336"]
+PHOTOS_DIR = "fotos"
+EXCEL_FILE = "resultado_scores.xlsx"
+MAX_IMG_SIZE = (220, 220)
+
+ORIGINAL_PHOTOS = sorted([os.path.join(PHOTOS_DIR, f) for f in os.listdir(PHOTOS_DIR)
+if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+if not ORIGINAL_PHOTOS:
+print("No photos found in the specified folder!")
+raise SystemExit
+
+DEMO_PHOTOS = ORIGINAL_PHOTOS.copy()
+random.shuffle(DEMO_PHOTOS)
+
+root = ctk.CTk()
+root.title("Grimace Evaluation")
+root.geometry("520x780")
+root.resizable(False, False)
+root.configure(fg_color="#1F1F1F")
+
+root.grid_rowconfigure(0, weight=0)
+root.grid_rowconfigure(1, weight=1)
+root.grid_rowconfigure(2, weight=0)
+root.grid_columnconfigure(0, weight=1)
+
+frame_img = ctk.CTkFrame(root, width=MAX_IMG_SIZE + 30, height=MAX_IMG_SIZE + 30)
+frame_img.grid(row=0, column=0, pady=(PADDING_VERT, PADDING_VERT), padx=10)
+frame_img.grid_propagate(False)
+
+label_photo = ctk.CTkLabel(frame_img, text="", width=MAX_IMG_SIZE, height=MAX_IMG_SIZE)
+label_photo.place(relx=0.5, rely=0.5, anchor="center")
+
+controls_frame = ctk.CTkFrame(root)
+controls_frame.grid(row=1, column=0, sticky="nsew", padx=20)
+controls_frame.grid_columnconfigure(0, weight=1)
+for idx in range(len(ACTION_UNITS)):
+controls_frame.grid_rowconfigure(idx, weight=1)
+
+score_vars = {}
+score_value_labels = {}
+
+for idx, unit in enumerate(ACTION_UNITS):
+unit_frame = ctk.CTkFrame(controls_frame)
+unit_frame.grid(row=idx, column=0, pady=6, sticky="ew")
+unit_frame.grid_columnconfigure(0, weight=1)
+
+lbl = ctk.CTkLabel(unit_frame, text=unit.title(), font=FONT_TITLE)
+lbl.grid(row=0, column=0, columnspan=4, pady=(2, 8))
+
+score_label = ctk.CTkLabel(unit_frame, text="Value: 0", font=FONT_LABEL)
+score_label.grid(row=1, column=0, padx=(10, 16), sticky="e")
+score_value_labels[unit] = score_label
+
+var = ctk.IntVar(value=0)
+score_vars[unit] = var
+
+for i, color in enumerate(SCORE_COLORS):
+    def on_score(u=unit, v=i, l=score_label):
+        score_vars[u].set(v)
+        l.configure(text=f"Value: {v}")
+    btn = ctk.CTkButton(
+        unit_frame,
+        text=str(i),
+        fg_color=color,
+        hover_color="#555555",
+        width=BUTTON_WIDTH,
+        height=BUTTON_HEIGHT,
+        corner_radius=8,
+        command=on_score)
+    btn.grid(row=1, column=i + 1, padx=6, pady=0)
+
+bottom_frame = ctk.CTkFrame(root)
+bottom_frame.grid(row=2, column=0, pady=(PADDING_VERT, 15), sticky="ew", padx=20)
+bottom_frame.grid_columnconfigure(0, weight=1)
+
+progress = ctk.CTkProgressBar(bottom_frame, width=250, height=18)
+progress.grid(row=0, column=0, pady=(6, 8), sticky="ew")
+
+progress_label = ctk.CTkLabel(bottom_frame, text="0%", font=FONT_LABEL)
+progress_label.grid(row=1, column=0, pady=(0, 10), sticky="ew")
+
+def next_photo():
+global photo_index, df
+if photo_index >= len(DEMO_PHOTOS):
+return
+try:
+photo_name = os.path.basename(DEMO_PHOTOS[photo_index])
+group, animal, day, photo_num = parse_photo_info(photo_name)
+photo_mean = 0 if len(ACTION_UNITS) == 0 else sum(score_vars[u].get() for u in ACTION_UNITS) / len(ACTION_UNITS)
+scores = {u: score_vars[u].get() for u in ACTION_UNITS}
+scores["Photo"] = photo_name
+scores["Photo_Mean"] = photo_mean
+scores["Group"] = group
+scores["Animal"] = animal
+scores["Day"] = day
+scores["Photo_Num"] = photo_num
+df = pd.concat([df, pd.DataFrame([scores])], ignore_index=True)
+except Exception as e:
+print(f"Error saving scores: {e}")
+for var in score_vars.values():
+var.set(0)
+photo_index += 1
+show_photo()
+
+btn_next = ctk.CTkButton(
+bottom_frame,
+text="Next Photo",
+width=120,
+height=35,
+corner_radius=10,
+fg_color="#2196F3",
+hover_color="#1976D2",
+command=lambda: next_photo())
+btn_next.grid(row=2, column=0, pady=0)
+
+if os.path.exists(EXCEL_FILE):
+df = pd.read_excel(EXCEL_FILE)
+else:
+df = pd.DataFrame(columns=["Photo"] + ACTION_UNITS + ["Photo_Mean", "Group", "Animal", "Day", "Photo_Num"])
+
+photo_index = 0
+
+def parse_photo_info(photo_name):
+base = os.path.splitext(photo_name)
+pattern = r'^([\w\s]+)\s(\d+)\s-\s(\d+)\s(\d+)(\d+)'
+m = re.match(pattern, base)
+if m:
+group = m.group(1).strip()
+animal = m.group(2)
+day = m.group(3)
+photo_num = m.group(4)
+return group, animal, day, photo_num
+return '', '', '', ''
+
+def compute_means(df):
+if "Photo_Mean" not in df or df["Photo_Mean"].notnull().sum() == 0:
+df["Photo_Mean"] = 0
+animal_mean = df.groupby("Animal")["Photo_Mean"].mean().reset_index()
+animal_mean = animal_mean.rename(columns={"Photo_Mean": "Animal_Mean"})
+return animal_mean
+
+def show_photo():
+global current_photo, photo_tk
+if photo_index >= len(DEMO_PHOTOS):
+progress.set(1.0)
+progress_label.configure(text="100%")
+popup = ctk.CTkToplevel(root)
+popup.title("Done")
+popup.geometry("210x95")
+label_popup = ctk.CTkLabel(popup, text="Evaluation complete!", font=("Arial", 11, "bold"),
+text_color="#4CAF50", width=MAX_IMG_SIZE, height=22)
+label_popup.pack(pady=14)
+btn_close = ctk.CTkButton(popup, text="Close", command=popup.destroy, width=90, height=22)
+btn_close.pack(pady=6)
+root.update()
+animal_mean = compute_means(df)
+means = df[["Photo", "Photo_Mean", "Group", "Animal", "Day", "Photo_Num"]].merge(animal_mean, on="Animal", how="left")
+try:
+with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
+df.to_excel(writer, sheet_name="Raw_Results", index=False)
+means.to_excel(writer, sheet_name="Means", index=False)
+except Exception as e:
+print(f"Error saving Excel: {e}")
+try:
+wb = load_workbook(EXCEL_FILE)
+for sheet_name in ["Raw_Results", "Means"]:
+ws = wb[sheet_name]
+for col in ws.columns:
+max_length = 0
+col_letter = get_column_letter(col.column)
+for cell in col:
+try:
+max_length = max(max_length, len(str(cell.value)))
+except Exception:
+pass
+ws.column_dimensions[col_letter].width = max_length + 2
+for cell in ws:​
+cell.font = Font(bold=True)
+cell.alignment = Alignment(horizontal='center', vertical='center')
+wb.save(EXCEL_FILE)
+except Exception as e:
+print(f"Error formatting Excel: {e}")
+try:
+subprocess.Popen(["start", EXCEL_FILE], shell=True)
+except Exception as e:
+print(f"Error trying to open Excel: {e}")
+root.after(1300, root.destroy)
+return
+
+path = DEMO_PHOTOS[photo_index]
+current_photo = Image.open(path)
+current_photo.thumbnail(MAX_IMG_SIZE)
+if current_photo.mode != 'RGBA':
+current_photo = current_photo.convert('RGBA')
+bg = Image.new('RGBA', MAX_IMG_SIZE, (0, 0, 0, 0))
+pos = (
+(MAX_IMG_SIZE - current_photo.width) // 2,
+(MAX_IMG_SIZE - current_photo.height) // 2​
+)
+bg.paste(current_photo, pos, current_photo)
+photo_tk = ImageTk.PhotoImage(bg)
+label_photo.configure(image=photo_tk, text="", width=MAX_IMG_SIZE, height=MAX_IMG_SIZE)​​
+
+pct = photo_index / len(DEMO_PHOTOS) if len(DEMO_PHOTOS) else 0
+progress.set(pct)
+progress_label.configure(text=f"{int(pct * 100)}%")
+for unit in ACTION_UNITS:
+    score_value_labels[unit].configure(text=f"Value: {score_vars[unit].get()}")
+
+show_photo()
+root.mainloop()
